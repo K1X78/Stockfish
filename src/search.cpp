@@ -162,11 +162,14 @@ bool is_shuffling(Move move, Stack* const ss, const Position& pos) {
 inline int futility_depth(Value eval, Value beta) {
     // LUT values obtained from:
     //      depth = 13 + int(0.5 + 6 / int(1 + pow(abs(eval) + abs(beta), 3) / 50'000'000'000))
-    static constexpr std::array Lut{Value(1657), 2555, 3294, 4122, 5314, 8194, VALUE_INFINITE * 2};
-    const Value                 prob  = std::abs(eval) + std::abs(beta);
-    int                         depth = 0;
-    while (Lut[depth] < prob)
-        ++depth;
+    static constexpr std::array<Value, 7> Lut{Value(1657), 2555, 3294, 4122, 5314, 8194,
+                                              VALUE_INFINITE * 2};
+    const Value prob = std::abs(eval) + std::abs(beta);
+    // Branchless fixpoint of the old lookup loop. Lut[6] can never be < prob
+    // (prob <= 2 * VALUE_INFINITE), so it never contributes and the byte-for-byte
+    // identical result of the original while loop is preserved.
+    const int depth = (prob > Lut[0]) + (prob > Lut[1]) + (prob > Lut[2]) + (prob > Lut[3])
+                    + (prob > Lut[4]) + (prob > Lut[5]);
 
     return 19 - depth;
 }
