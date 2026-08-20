@@ -72,6 +72,12 @@ constexpr u64 NODES_LIMIT_OUTPUT = 10'000'000;
 constexpr int SEARCHEDLIST_CAPACITY = 32;
 using SearchedList                  = ValueList<Move, SEARCHEDLIST_CAPACITY>;
 
+constexpr Value NMP_TENSION_MIN_FAIL       = 96;
+constexpr Value NMP_TENSION_EVAL_MARGIN    = 128;
+constexpr int   NMP_TENSION_MAX_REDUCTION  = 768;
+constexpr int   NMP_TENSION_REDUCTION_STEP = 8;
+constexpr int   NMP_TENSION_MAX_MOVES      = 3;
+
 // (*Scalers):
 // The values with Scaler asterisks have proven non-linear scaling.
 // They are optimized to time controls of 180 + 1.8 and longer,
@@ -772,6 +778,8 @@ Value Search::Worker::search(
     SearchedList capturesSearched;
     SearchedList quietsSearched;
 
+    int nullMoveTension = 0;
+
     // Step 1. Initialize node
     ss->inCheck   = pos.checkers();
     priorCapture  = pos.captured_piece();
@@ -1031,6 +1039,16 @@ Value Search::Worker::search(
         Value nullValue = -search<NonPV>(pos, ss + 1, -beta, -beta + 1, depth - R, false);
 
         undo_null_move(pos);
+
+        if (nullValue < beta && !is_decisive(nullValue) && !is_decisive(beta)
+            && std::abs(ss->staticEval - beta) <= NMP_TENSION_EVAL_MARGIN)
+        {
+            const Value nullFail = beta - nullValue;
+            if (nullFail > NMP_TENSION_MIN_FAIL)
+                nullMoveTension = std::min(
+                  int(nullFail - NMP_TENSION_MIN_FAIL) * NMP_TENSION_REDUCTION_STEP,
+                  NMP_TENSION_MAX_REDUCTION);
+        }
 
         // Do not return unproven mate or TB scores
         if (nullValue >= beta && !is_win(nullValue))
@@ -1366,6 +1384,10 @@ moves_loop:  // When in check, search starts here
         // Scale up reductions for expected ALL nodes
         if (allNode)
             r += r * 276 / (256 * depth + 268);
+
+        if (nullMoveTension && moveCount <= NMP_TENSION_MAX_MOVES && !capture && !givesCheck
+            && move.type_of() != PROMOTION)
+            r -= std::min(std::max(r, 0), nullMoveTension);
 
         // Step 17. Late moves reduction / extension (LMR)
         if (depth >= 2 && moveCount > 1)
