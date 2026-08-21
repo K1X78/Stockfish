@@ -477,6 +477,60 @@ sf_always_inline inline PsqtTile apply_psqt(IndexType                         j,
     return acc;
 }
 
+#ifdef VECTOR
+
+template<bool SinglePsqPair>
+sf_always_inline inline void apply_main_accumulator(const FeatureTransformer&          featureTransformer,
+                                                    const PSQFeatureSet::IndexList&    psqAdded,
+                                                    const PSQFeatureSet::IndexList&    psqRemoved,
+                                                    const ThreatFeatureSet::IndexList& thrAdded,
+                                                    const ThreatFeatureSet::IndexList& thrRemoved,
+                                                    const i16*                         fromAcc,
+                                                    i16*                               toAcc) {
+
+    const auto* removedBase =
+      SinglePsqPair ? &featureTransformer.weights[psqRemoved[0] * Dimensions] : nullptr;
+    const auto* addedBase =
+      SinglePsqPair ? &featureTransformer.weights[psqAdded[0] * Dimensions] : nullptr;
+
+    Tile acc;
+
+    for (IndexType j = 0; j < Dimensions / Tiling::TileHeight; ++j)
+    {
+        const usize tileOff  = j * Tiling::TileHeight;
+        auto*       fromTile = reinterpret_cast<const vec_t*>(&fromAcc[tileOff]);
+        auto*       toTile   = reinterpret_cast<vec_t*>(&toAcc[tileOff]);
+
+        for (IndexType k = 0; k < Tiling::NumRegs; ++k)
+            acc[k] = fromTile[k];
+
+        if constexpr (SinglePsqPair)
+        {
+            const auto* removed = reinterpret_cast<const vec_t*>(removedBase + tileOff);
+            const auto* added   = reinterpret_cast<const vec_t*>(addedBase + tileOff);
+
+            for (IndexType k = 0; k < Tiling::NumRegs; ++k)
+            {
+                acc[k] = vec_sub_16(acc[k], removed[k]);
+                acc[k] = vec_add_16(acc[k], added[k]);
+            }
+        }
+        else
+        {
+            acc = apply_psq_features<-1>(tileOff, acc, psqRemoved, featureTransformer);
+            acc = apply_psq_features<+1>(tileOff, acc, psqAdded, featureTransformer);
+        }
+
+        acc = apply_threat_features<-1>(tileOff, acc, thrRemoved, featureTransformer);
+        acc = apply_threat_features<+1>(tileOff, acc, thrAdded, featureTransformer);
+
+        for (IndexType k = 0; k < Tiling::NumRegs; ++k)
+            vec_store(&toTile[k], acc[k]);
+    }
+}
+
+#endif
+
 void apply_combined(Color                              perspective,
                     const FeatureTransformer&          featureTransformer,
                     const AccumulatorState&            from,
@@ -492,9 +546,17 @@ void apply_combined(Color                              perspective,
     const auto& fromPsqtAcc = from.psqtAccumulation[perspective];
     auto&       toPsqtAcc   = to.psqtAccumulation[perspective];
 
-    Tile     acc;
     PsqtTile psqt;
 
+#ifdef VECTOR
+    if (psqRemoved.size() == 1 && psqAdded.size() == 1)
+        apply_main_accumulator<true>(featureTransformer, psqAdded, psqRemoved, thrAdded, thrRemoved,
+                                     fromAcc.data(), toAcc.data());
+    else
+        apply_main_accumulator<false>(featureTransformer, psqAdded, psqRemoved, thrAdded, thrRemoved,
+                                      fromAcc.data(), toAcc.data());
+#else
+    Tile acc;
     for (IndexType j = 0; j < Dimensions; increment_index(j))
     {
         acc = load_tile(j, fromAcc.data());
@@ -507,6 +569,7 @@ void apply_combined(Color                              perspective,
 
         store_tile(j, toAcc.data(), acc);
     }
+#endif
 
     for (IndexType j = 0; j < PSQTBuckets; increment_psqt_index(j))
     {
